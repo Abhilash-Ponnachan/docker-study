@@ -462,7 +462,7 @@ $ curl 172.17.0.2
 </html>
 ```
 
-​		However now since the container's port 80 is mapped to the host port 80, we should be able to get the same page if we do a localhost (or the IP the host itself from outside).
+​		Now since the container's port 80 is mapped to the host port 80, we should be able to get the same page if we do a localhost (or the IP the host itself from outside).
 
 ```bash
 $  curl localhost
@@ -478,7 +478,9 @@ $  curl localhost
 
 ​		An image is the "source" from which a running instance (container) is created. It specifies everything we need to run our application/service (such as the runtime, the libraries, configuration, environment variables, code). These are specified in 'layers'. These layers are cached because of which they are more reusable, quicker to deploy, and take up less space overall.
 
-​		In the previous sections we played around with the containers that we launched from some images to configure it and setup the services that we want to run on it.  This is great for experimenting and learning, however in an actual scenario we would want to have everything setup and configured so that as soon as the container is run from the image it is up and ready to function. This is what we can use the `'Dockerfile'` for.
+​		In the previous sections we played around with the containers that we launched from some already built images, configured them and setup the services that we want to run on it.  We also learned to `commit` containers to as images, so that we can create new images which persist the configuration changes we did. 
+
+This is great for experimenting and learning, however in an actual scenario we would want to have everything setup and configured so that as soon as the container is run from the image it is up and ready to function. Also we normally want our containers to reflect the changes we make to our code. To do this we use the `'Dockerfile'`.
 
 ​		There is no need create and image from scratch. Most of the time an image is based on some **parent image** (like `nginx` or `node`). Images without a parent image is called a **base image**.
 
@@ -490,8 +492,237 @@ COPY hello /
 CMD ["/hello"]
 ```
 
-​		Each line in the `Dockerfile` is a "layer". Here the first line is `"scratch"` (which serves as template for **base images**) which means that this image has no **parent image** and is a **base image**.
+​		Each line in the `Dockerfile` is a "layer". Here the first line is `"scratch"` (which serves as template for **base images**, it can be thought of as the top of the image hierarchy) which means that this image has no **parent image** and is a **base image**.
 
 ​		For a **base image** the second line always has to specify the "root file system". Here it simply copies the `hello` binary to the root(`/`) directory.
 
 ​		Lastly it executes the command specified in the `CMD` instruction and when that is done it exists and the container is stopped.
+
+#### "Imagize" a Node.js application
+
+​		Now we will try to take a Node.js application (actually two applications, one 	web frontend, and another as its service backend), and package them as `Docker` images using `Dockerfile`, then we can run containers from these images.
+
+​		We have two applications:
+
+​		A web frontend `test-app`, with an HTML page and some JavaScript for browser action, and also to make HTTP request to a backend service application.
+
+```bash
+$ cd tech/node-study/test-app/
+$ tree -L 2
+.
+├── index.html
+├── index.js
+├── package.json
+├── package-lock.json
+├── scripts
+│   └── client.js
+└── utils
+│   └── call-apis.js
+└── node_modules
+    └── .....
+```
+
+​		A backend application `srv-app`, that provides the logic and exposes an HTTP service endpoint for the frontend application.
+
+```bash
+$  cd tech/node-study/srv-app/
+$ tree -L 2
+.
+├── index.js
+├── package.json
+├── package-lock.json
+└── utils
+|   └── primes.js
+└── node_modules
+    └── .....
+```
+
+​		So the general approach for this would be to define a `Dockerfile` in each of the application directories, specify a parent image (`node: alpine` in this case), and copy our files across to some working directory (in the image), exclude the contents of `node_modules`, then specify commands to execute `npm install` and finally run the `node index.js` entry point. All this will be specified in each line to "Layer" the image creation.
+
+​		Our `Dockerfile` for packaging a `Node.js` application normally looks like:
+
+```dockerfile
+# parent image is node:01-alpine
+FROM node:10-alpine
+# declare a variable for application path
+ARG appPath=/home/node/app
+# make dir for app path and set owner as node:node
+RUN mkdir -p $appPath && chown -R node:node $appPath
+# set app path as the current working dir here onwards
+WORKDIR $appPath
+# copy package.json & pcakage-lock.json to the app path
+COPY package*.json ./
+# install npm dependencies
+RUN npm install
+# copy rest of the app (src) files
+COPY . .
+# set user as 'node' here onwards
+USER node
+# expose port 3001 (our app listens on 3001)
+EXPOSE 3001
+# set the cmd to seceute as 'node index.js'
+CMD ["node", "index.js"]
+```
+
+_Note: If we want to specify an `npm` `regsitry` (often when using an enterprise registry setup such as `artifactory`), we can declare that in the `Dockerfile`:_
+
+```dockerfile
+RUN npm config set registry http://registry.npmjs.org
+```
+
+​		Now we can build a docker image from the contents of this directory using this `Dockerfile`. To do that we use `docker build` command:
+
+```bash
+$ docker build -t "img-srv-app" .
+```
+
+​		This creates a docker image with the tag "img-srv-app:ltest", and we can see that with the `docker ls` command:
+
+```bash
+$ docker image ls --format "{{.Repository}}:{{.Tag}}"
+img-srv-app:latest
+node:10-alpine
+hello-world:latest
+```
+
+​		Next we can launch a container from this image and access the `Node.js` application exposed endpoint.
+
+```bash
+$ docker run -dt --name srv-app img-srv-app
+33341.............8fbb
+```
+
+​		If we want to see the result of the `run` action on the container we can use the `docker logs` command:
+
+```bash
+$ docker logs srv-app 
+listening on port 3001
+```
+
+​		Now our application is listening on `port 3001`. To send a request to that we will need it's IP, which we can get from the `inspect` command (or use `exec` and run `ip a`).
+
+```bash
+$ docker inspect srv-app | grep 'IPAddress'
+            "SecondaryIPAddresses": null,
+            "IPAddress": "172.17.0.2",
+                    "IPAddress": "172.17.0.2",
+```
+
+​		We can now try to make a request to our `srv-app` endpoint using this IP.
+
+```bash
+$ curl http://172.17.0.2:3001/apis/check-prime/23
+{"error":false,"msg":"","is_prime":true}
+```
+
+​		If we do not want to discover the IP of the container try accessing with that, we can do a **port mapping** of the container exposed port to a port on the host (using the `-p` flag). This can only be done when we `run` the container, so if we want to apply to it a running container, we would have to stop it, remove it and run it again with the mapping:
+
+```bash
+$ docker run -dt --name srv-app -p 3001:3001 img-srv-app
+003afb81................................................cdb2
+```
+
+​		Now we should be able to access the application endpoint via the `localhost`:
+
+```bash
+$ curl http://localhost:3001/apis/check-prime/23
+{"error":false,"msg":"","is_prime":true}
+```
+
+#### Environment variables (ENV)
+
+​		We have already seen above, how to use `ARG` to declare _"variables"_ which we can use within `Dockerfile`. The `ARG` variables are for use during the **image build** time (i.e. with the `docker build` command). We can use the `ENV` option to declare **environment variables** that can be specified when the **container is run**.
+
+​		In our example if we want the ability top specify the **"port"** (that our application should listen on) when we run the container we can do it by modifying the `Dockerfile` as follows:
+
+```dockerfile
+...
+# define an env variable 'PORT', give it a defualt value
+ENV PORT=3001
+# expoxe port using the 'port' env variable
+EXPOSE $PORT
+CMD ["node", "index.js"]
+```
+
+​		Now the identifier **"PORT"** will be available as an **environment variable** within the **Node.js** application, and we should be able to access it as:
+
+```javascript
+const port = process.env.PORT || 3001;
+....
+app.listen(port
+    , () => console.log(`listening on port ${port}`));
+```
+
+​		The `ENV` variable set in the `Dockerfile` gets injected and made available as `process.env` attribute in the `Node.js` code.
+
+​		This gives us the ability to specify the **port** that the application should listen on when we launch the container. If we wish to set it to `3002` for example, we could do that using the **`-e`** flag with the `run` command.
+
+```bash
+$ docker run -dt -e "PORT=3002" --name srv-app -p 3002:3002 img-srv-app
+411aff.................................................6848
+$ docker logs srv-app
+listening on port 3002
+```
+
+​		Now we should be bale to make a request to **port** `3002`:
+
+```bash
+$  curl http://localhost:3002/apis/check-prime/23
+{"error":false,"msg":"","is_prime":true}
+```
+
+​		We can extend this approach for our frontend application `test-app`, to use `ENV` variables to configure the backend service endpoint (from `srv-app`).
+
+​		To do that we can add a couple of extra `ENV` variables in the `Dockerfile` for the `test-app`:
+
+```dockerfile
+...
+ENV PORT=3000
+ENV SRV_HOST=localhost
+ENV SRV_PORT=3001
+EXPOSE $PORT
+CMD ["node", "index.js"]
+```
+
+​		We have two `ENV` variables - `SRV_HOST` and `SRV_PORT`. Now build the image from this file, and launch a container passing in the **host address** and **port** of the backend `srv-app` container. Before we can do that, we have to discover those values (using `docker inspect` and `docker exec` with `netstat`):
+
+```bash
+$ docker inspect srv-app | grep IPAddress
+            "SecondaryIPAddresses": null,
+            "IPAddress": "172.17.0.2",
+                    "IPAddress": "172.17.0.2",
+$ docker exec -it srv-app netstat -lt
+Active Internet connections (only servers)
+Proto Recv-Q Send-Q Local Address           Foreign Address         State       
+tcp        0      0 :::3002                 :::*                    LISTEN
+```
+
+​		Now we know the values for **host** and **port**, we can provide them to the `test-app` container when we launch it (via the **`-e`** flags):
+
+```bash
+$ docker run --name test-app -dt -p 3000:3000 -e PORT=3000 -e SRV_HOST=172.17.0.2 -e SRV_PORT=3002 img-test-app
+87a1cc06.............................................5197
+$ docker logs test-app 
+listening on port 3000
+```
+
+​		Now if we go to `http://localhost:3000` in a web browser, we should get our frontend application page loaded, and the when we try to execute some action this application should be able to talk to the backend application (`srv-app`) running in its container (provided the network settings allow it it, the default would be `bridge`).
+
+
+
+-----------------
+
+_Note: copying files from Linux machine to a raspberry pi:_
+
+```bash
+$ rsync -av -e ssh --exclude='node_modules/' . pi@192.168.xx.xx:~/test-app
+```
+
+- Use `rsync` utility (because with `scp` we cannot exclude files/directories easily)
+- `-a` : recursively copy
+- `v` : give verbose output
+- `-e ssh` : encrypt channel with `ssh`
+- `--exclude='node_modules/'` : exclude `node_modules` directory
+- `.` : path to source (current directory in our case)
+- `pi@192.168.xx.xx` : user@host
+- `:~/test-app` : `:` path at destination (in raspberry pi)
